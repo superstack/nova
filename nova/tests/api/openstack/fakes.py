@@ -27,7 +27,6 @@ from paste import urlmap
 from glance import client as glance_client
 from glance.common import exception as glance_exc
 
-from nova import auth
 from nova import context
 from nova import exception as exc
 from nova import flags
@@ -36,6 +35,7 @@ import nova.api.openstack.auth
 from nova.api import openstack
 from nova.api.openstack import auth
 from nova.api.openstack import ratelimiting
+from nova.auth.manager import User, Project
 from nova.image import glance
 from nova.image import local
 from nova.image import service
@@ -228,22 +228,105 @@ class FakeAuthDatabase(object):
 
 
 class FakeAuthManager(object):
-    auth_data = {}
+    #NOTE(justinsb): Accessing static variables through instances is FUBAR
+    #NOTE(justinsb): This should also be private!
+    auth_data = []
+    projects = {}
 
-    def add_user(self, key, user):
-        FakeAuthManager.auth_data[key] = user
+    @classmethod
+    def clear_fakes(cls):
+        cls.auth_data = []
+        cls.projects = {}
+
+    @classmethod
+    def reset_fake_data(cls):
+        cls.auth_data = dict(acc1=User('guy1', 'guy1', 'acc1',
+                                       'fortytwo!', False))
+        cls.projects = dict(testacct=Project('testacct',
+                                             'testacct',
+                                             'guy1',
+                                             'test',
+                                              []))
+
+    def add_user(self, user):
+        FakeAuthManager.auth_data.append(user)
+
+    def get_users(self):
+        return FakeAuthManager.auth_data
 
     def get_user(self, uid):
-        for k, v in FakeAuthManager.auth_data.iteritems():
-            if v.id == uid:
-                return v
-        return None
-
-    def get_project(self, pid):
+        for u in FakeAuthManager.auth_data:
+            if u.id == uid:
+                return u
         return None
 
     def get_user_from_access_key(self, key):
-        return FakeAuthManager.auth_data.get(key, None)
+        for u in FakeAuthManager.auth_data:
+            if u.access == key:
+                return u
+        return None
+
+    def delete_user(self, uid):
+        for u in FakeAuthManager.auth_data:
+            if u.id == uid:
+                FakeAuthManager.auth_data.remove(u)
+        return None
+
+    def create_user(self, name, access=None, secret=None, admin=False):
+        u = User(name, name, access, secret, admin)
+        FakeAuthManager.auth_data.append(u)
+        return u
+
+    def modify_user(self, user_id, access=None, secret=None, admin=None):
+        user = None
+        for u in FakeAuthManager.auth_data:
+            if u.id == user_id:
+                user = u
+        if user:
+            user.access = access
+            user.secret = secret
+            if admin is not None:
+                user.admin = admin
+
+    def is_admin(self, user):
+        return user.admin
+
+    def is_project_member(self, user, project):
+        return ((user.id in project.member_ids) or
+                (user.id == project.project_manager_id))
+
+    def create_project(self, name, manager_user, description=None,
+                       member_users=None):
+        member_ids = [User.safe_id(m) for m in member_users] \
+                     if member_users else []
+        p = Project(name, name, User.safe_id(manager_user),
+                                 description, member_ids)
+        FakeAuthManager.projects[name] = p
+        return p
+
+    def delete_project(self, pid):
+        if pid in FakeAuthManager.projects:
+            del FakeAuthManager.projects[pid]
+
+    def modify_project(self, project, manager_user=None, description=None):
+        p = FakeAuthManager.projects.get(project)
+        p.project_manager_id = User.safe_id(manager_user)
+        p.description = description
+
+    def get_project(self, pid):
+        p = FakeAuthManager.projects.get(pid)
+        if p:
+            return p
+        else:
+            raise exc.NotFound
+
+    def get_projects(self, user=None):
+        if not user:
+            return FakeAuthManager.projects.values()
+        else:
+            return [p for p in FakeAuthManager.projects.values()
+                    if (user.id in p.member_ids) or
+                       (user.id == p.project_manager_id)]
 
 
 class FakeRateLimiter(object):
